@@ -1,0 +1,5 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+  package="dev.netdiag.flutter_netdiag_plus">
+    <!-- Merge tự động vào manifest của app dùng package này -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+</manifest>
