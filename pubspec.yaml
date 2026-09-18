@@ -1,7 +1,9 @@
 name: flutter_netdiag_plus
-description: "Đo lường mạng chi tiết cho Flutter: DNS lookup, TCP connect, HTTP RTT, ping nhiều đích, traceroute (Android NDK + iOS native)."
+description: "Detailed network diagnostics for Flutter: DNS lookup, TCP connect, HTTP RTT, multi-target ping, traceroute (Android NDK + native iOS)."
 version: 0.1.0
-homepage:
+homepage: https://github.com/MrTuyennn/flutter_netdiag_plus
+repository: https://github.com/MrTuyennn/flutter_netdiag_plus
+issue_tracker: https://github.com/MrTuyennn/flutter_netdiag_plus/issues
 
 environment:
   sdk: ^3.13.1

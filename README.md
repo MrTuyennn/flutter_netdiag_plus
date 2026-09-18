@@ -1,11 +1,12 @@
 # flutter_netdiag_plus
 
-Đo lường mạng chi tiết cho Flutter: DNS lookup, TCP connect, HTTP RTT, ping
-nhiều đích, traceroute. Toàn bộ phần đo dùng `dart:io` thuần — chỉ traceroute
-cần code native, và code đó đã đóng gói sẵn trong package, tự build khi bạn
-`flutter pub get` — không cần thao tác Xcode/Gradle thủ công.
+Detailed network diagnostics for Flutter: DNS lookup, TCP connect, HTTP RTT,
+multi-target ping, traceroute. All measurements use pure `dart:io` — only
+traceroute needs native code, and that code ships pre-packaged with the
+plugin and builds automatically on `flutter pub get`, no manual Xcode/Gradle
+steps required.
 
-## Cài đặt
+## Install
 
 ```yaml
 dependencies:
@@ -16,19 +17,19 @@ dependencies:
 flutter pub get
 ```
 
-## Quyền cần khai báo
+## Permissions
 
-**Android** — package tự merge `INTERNET` permission vào app dùng nó, không
-cần khai báo gì thêm.
+**Android** — the package automatically merges the `INTERNET` permission
+into the app that uses it, nothing else to declare.
 
-**iOS** — không cần khai báo gì. `Socket.connect` không đụng ATS (ATS chỉ chi
-phối `NSURLSession`). Chỉ khi ping host trong LAN mới cần thêm
-`NSLocalNetworkUsageDescription` vào `Info.plist` của app.
+**iOS** — nothing to declare. `Socket.connect` doesn't go through ATS (ATS
+only governs `NSURLSession`). Only pinging a LAN host requires adding
+`NSLocalNetworkUsageDescription` to the app's `Info.plist`.
 
-**macOS** — app cần bật `com.apple.security.network.client` trong
-`macos/Runner/*.entitlements` nếu dùng App Sandbox.
+**macOS** — the app needs to enable `com.apple.security.network.client` in
+`macos/Runner/*.entitlements` if it uses App Sandbox.
 
-## Dùng
+## Usage
 
 ```dart
 import 'package:flutter_netdiag_plus/flutter_netdiag_plus.dart';
@@ -45,32 +46,34 @@ NetworkDiagnosticPanel(
 )
 ```
 
-Không cần UI — hợp cho nút "Báo lỗi mạng", đính `report.toJson()` vào ticket:
+No UI needed — fits a "Report network issue" button, attach
+`report.toJson()` to the ticket:
 
 ```dart
 final report = await NetworkDiagnosticService(host: 'api.example.com').runOnce();
 await api.sendTicket(diagnostics: report.toJson());
 ```
 
-## Vài quyết định thiết kế
+## Some design decisions
 
-**Ping bằng TCP connect, không phải ICMP.** ICMP raw socket cần native code,
-Android 10+ siết, và nhiều firewall drop ICMP nhưng vẫn cho TCP 443 qua — tức
-là ICMP fail giả trong khi mạng vẫn tốt. Thời gian bắt tay TCP cũng sát với độ
-trễ thật mà app cảm nhận, vì app cũng nói chuyện qua TCP/TLS chứ không ping ai
-cả.
+**Ping via TCP connect, not ICMP.** Raw ICMP sockets need native code,
+Android 10+ restricts them, and many firewalls drop ICMP while still
+letting TCP 443 through — meaning ICMP reports a false failure while the
+network is actually fine. TCP handshake time is also close to the real
+latency an app feels, since the app itself talks over TCP/TLS, not ICMP.
 
-**Lấy min chứ không lấy trung bình.** Nhiễu mạng chỉ làm số đo *tăng*, nên lần
-nhanh nhất trong 3 lần thử là ước lượng sát nhất của độ trễ thật. Trung bình bị
-một cú spike kéo lệch ngay.
+**Takes the min, not the average.** Network noise can only make a
+measurement *higher*, so the fastest of 3 attempts is the closest estimate
+of the true latency. An average gets skewed by a single spike.
 
-**DNS sẽ ra ~0ms từ lần đo thứ 2.** `InternetAddress.lookup` đi qua resolver
-của OS nên có cache. Muốn số thật thì thay bằng DoH query thẳng 1.1.1.1 /
-8.8.8.8 — chỗ cần sửa có comment sẵn trong service.
+**DNS will read ~0ms from the 2nd measurement on.** `InternetAddress.lookup`
+goes through the OS resolver, which caches results. For a true reading,
+swap in a direct DoH query to 1.1.1.1 / 8.8.8.8 — the spot to change already
+has a comment in the service.
 
 ## Traceroute
 
-Cắm vào qua `hopResolver`:
+Plug it in via `hopResolver`:
 
 ```dart
 NetworkDiagnosticService(
@@ -82,73 +85,80 @@ NetworkDiagnosticService(
 )
 ```
 
-Hoặc dùng độc lập:
+Or use it standalone:
 
 ```dart
 final result = await createTraceroute().trace('example.com');
 for (final hop in result.hops) {
-  print(hop);          // "3  10.1.2.3  12.3ms"  hoặc  "4  *"
+  print(hop);          // "3  10.1.2.3  12.3ms"  or  "4  *"
 }
 ```
 
-`reachedDestination == false` nghĩa là hết `maxHops` mà chưa chạm đích — số hop
-khi đó chỉ là **cận dưới**, UI hiện "≥ N chặng".
+`reachedDestination == false` means `maxHops` ran out before reaching the
+target — the hop count is then just a **lower bound**, and the UI shows
+"≥ N hops".
 
-### Cách làm trên từng nền tảng
+### Platform-specific approach
 
-| Nền tảng      | Cách                                                    |
-|---------------|-----------------------------------------------------------|
-| Android       | lặp `ping -c1 -t <ttl>`, fallback native NDK (ICMP ping-socket) nếu exec bị chặn |
-| Linux / macOS | gọi thẳng `traceroute -n`                               |
-| Windows       | gọi `tracert -d`                                        |
-| iOS           | native Swift (UDP probe + socket ICMP thụ động)         |
+| Platform      | Approach                                                   |
+|---------------|--------------------------------------------------------------|
+| Android       | loops `ping -c1 -t <ttl>`, falls back to native NDK (ICMP ping-socket) if exec is blocked |
+| Linux / macOS | calls `traceroute -n` directly                               |
+| Windows       | calls `tracert -d`                                            |
+| iOS           | native Swift (UDP probe + passive ICMP socket)                |
 
-### iOS: UDP probe + ICMP thụ động
+### iOS: UDP probe + passive ICMP
 
-1. Gửi probe bằng UDP tới port `33434+ttl`, đặt `IP_TTL` tăng dần.
-2. Một socket ICMP **riêng, chỉ đọc không gửi**, nhận ICMP Time Exceeded.
-3. Match reply với probe bằng port đích nằm trong payload lồng bên trong.
+1. Sends a UDP probe to port `33434+ttl`, with increasing `IP_TTL`.
+2. A **separate, receive-only** ICMP socket picks up the ICMP Time Exceeded
+   reply.
+3. Matches the reply to the probe using the destination port embedded in
+   the nested payload.
 
-Không dùng biến thể ICMP Echo + `IP_TTL` như trên Linux, vì `setsockopt(IP_TTL)`
-trên `SOCK_DGRAM` ICMP của Darwin hoạt động không nhất quán, và việc match
-reply phải dựa vào nội dung payload lồng — dễ sai. Dùng UDP thì port đích
-chính là mã số của probe, match chuẩn xác.
+Doesn't use the ICMP Echo + `IP_TTL` variant used on Linux, because
+`setsockopt(IP_TTL)` on Darwin's `SOCK_DGRAM` ICMP socket behaves
+inconsistently, and matching a reply would then have to rely on the nested
+payload content — error-prone. With UDP, the destination port *is* the
+probe's id, so matching is exact.
 
-### Android: ping -t, fallback NDK khi exec bị chặn
+### Android: `ping -t`, fallback to NDK when exec is blocked
 
-Android không có binary `traceroute`, nhưng `ping` của toybox có cờ `-t TTL` —
-gửi TTL tăng dần rồi đọc ICMP Time Exceeded chính là thuật toán traceroute.
+Android has no `traceroute` binary, but toybox's `ping` has a `-t TTL`
+flag — sending increasing TTLs and reading the ICMP Time Exceeded replies
+*is* the traceroute algorithm.
 
-Một số ROM (chủ yếu ROM Trung Quốc) chặn `execve` ở tầng SELinux/seccomp —
-`Process.run('ping', ...)` ném `ProcessException` ngay lập tức. Package tự
-phát hiện bằng self-ping loopback, và nếu bị chặn thì chuyển sang code C
-trong `android/src/main/cpp/traceroute.c`:
+Some ROMs (mostly Chinese ROMs) block `execve` at the SELinux/seccomp
+layer — `Process.run('ping', ...)` throws a `ProcessException` right away.
+The package detects this automatically via a loopback self-ping, and falls
+back to the C code in `android/src/main/cpp/traceroute.c` when blocked:
 
-- Mở **ICMP ping-socket** (`socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)`) —
-  không phải raw socket nên không cần root, Android cho phép nhờ sysctl
-  `net.ipv4.ping_group_range`.
-- TTL tăng dần qua `setsockopt(IP_TTL)`.
-- ICMP Time Exceeded từ router giữa đường đọc qua
-  `recvmsg(fd, &msg, MSG_ERRQUEUE)` sau khi bật `IP_RECVERR` — API này không
-  có trong `android.system.Os` của Android SDK nên bắt buộc viết native
-  (NDK/JNI), không làm thuần Kotlin được.
+- Opens an **ICMP ping-socket** (`socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)`)
+  — not a raw socket, so no root needed; Android allows it via the
+  `net.ipv4.ping_group_range` sysctl.
+- Increases TTL via `setsockopt(IP_TTL)`.
+- Reads the ICMP Time Exceeded from routers along the path via
+  `recvmsg(fd, &msg, MSG_ERRQUEUE)` after enabling `IP_RECVERR` — this API
+  isn't exposed by `android.system.Os` in the Android SDK, so it has to be
+  written natively (NDK/JNI); it can't be done in pure Kotlin.
 
-Build tự động qua Gradle (`externalNativeBuild { cmake { ... } }`), không cần
-thao tác gì thêm.
+Builds automatically via Gradle (`externalNativeBuild { cmake { ... } }`),
+no extra steps needed.
 
-### Giới hạn cần biết
+### Known limitations
 
-- **Chặng `*` là bình thường.** Nhiều router cố tình không trả ICMP Time
-  Exceeded, hoặc rate-limit nó. Traceroute nào cũng gặp, không phải bug.
-- **Chậm.** 30 hop × 1.5s = tệ nhất ~45 giây. Nếu chỉ cần số hop, hạ `maxHops`
-  xuống 20 là đủ cho hầu hết đích trong nước.
-- **Đo qua mobile data có thể trả về ít hop hơn thực tế** — CGNAT của nhà mạng
-  giấu bớt chặng.
-- **Chỉ IPv4.** Đích IPv6 sẽ resolve fail.
+- **A `*` hop is normal.** Many routers deliberately don't reply with ICMP
+  Time Exceeded, or rate-limit it. Every traceroute implementation runs
+  into this — it isn't a bug.
+- **Slow.** 30 hops × 1.5s is a worst case of ~45 seconds. If you only need
+  the hop count, lowering `maxHops` to 20 is enough for most domestic
+  targets.
+- **Measuring over mobile data can report fewer hops than reality** — the
+  carrier's CGNAT hides some hops.
+- **IPv4 only.** An IPv6 target will fail to resolve.
 
-## Tuỳ biến giao diện
+## Customizing the UI
 
-Mọi màu sắc nằm trong `DiagTheme`:
+All colors live in `DiagTheme`:
 
 ```dart
 NetworkDiagnosticPanel(
@@ -161,7 +171,7 @@ NetworkDiagnosticPanel(
 )
 ```
 
-## Ví dụ
+## Example
 
-Xem `example/` trong repo để có app demo đầy đủ (ô nhập host + panel + copy
-JSON).
+See `example/` in the repo for a full demo app (host input field + panel +
+copy JSON).
