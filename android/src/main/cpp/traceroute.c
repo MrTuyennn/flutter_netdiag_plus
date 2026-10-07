@@ -128,23 +128,31 @@ static int probe_one(int fd, struct sockaddr_in *dest, int ttl, int timeoutMs,
 
             ssize_t n = recvmsg(fd, &msg, MSG_ERRQUEUE);
             double rtt = now_ms() - sentAt;
-            if (n >= 0) {
-                for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL;
-                     cmsg = CMSG_NXTHDR(&msg, cmsg)) {
-                    if (cmsg->cmsg_level != IPPROTO_IP || cmsg->cmsg_type != IP_RECVERR) continue;
+            // msg_iov mang lại đúng gói ICMP echo request gốc đã gửi — phải
+            // khớp id/sequence với probe hiện tại, nếu không đây là reply trễ
+            // của một TTL khác (do jitter/reorder) và phải bỏ qua, không được
+            // gán nhầm cho hop này.
+            if (n >= (ssize_t) sizeof(struct icmphdr)) {
+                struct icmphdr *origEcho = (struct icmphdr *) databuf;
+                if (origEcho->un.echo.id == htons(ident) &&
+                    origEcho->un.echo.sequence == htons((unsigned short) ttl)) {
+                    for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL;
+                         cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+                        if (cmsg->cmsg_level != IPPROTO_IP || cmsg->cmsg_type != IP_RECVERR) continue;
 
-                    struct sock_extended_err *ee = (struct sock_extended_err *) CMSG_DATA(cmsg);
-                    if (ee->ee_origin != SO_EE_ORIGIN_ICMP) continue;
+                        struct sock_extended_err *ee = (struct sock_extended_err *) CMSG_DATA(cmsg);
+                        if (ee->ee_origin != SO_EE_ORIGIN_ICMP) continue;
 
-                    struct sockaddr_in *offender = (struct sockaddr_in *) SO_EE_OFFENDER(ee);
-                    hop->hasAddress = 1;
-                    inet_ntop(AF_INET, &offender->sin_addr, hop->address, sizeof(hop->address));
-                    hop->hasRtt = 1;
-                    hop->rttMs = rtt;
-                    // Type 3 = Destination Unreachable: hết đường đi tiếp được,
-                    // coi như đã chạm biên — giống hành vi của bản Dart (ping).
-                    if (ee->ee_type == ICMP_DEST_UNREACH) hop->isDestination = 1;
-                    return 1;
+                        struct sockaddr_in *offender = (struct sockaddr_in *) SO_EE_OFFENDER(ee);
+                        hop->hasAddress = 1;
+                        inet_ntop(AF_INET, &offender->sin_addr, hop->address, sizeof(hop->address));
+                        hop->hasRtt = 1;
+                        hop->rttMs = rtt;
+                        // Type 3 = Destination Unreachable: hết đường đi tiếp được,
+                        // coi như đã chạm biên — giống hành vi của bản Dart (ping).
+                        if (ee->ee_type == ICMP_DEST_UNREACH) hop->isDestination = 1;
+                        return 1;
+                    }
                 }
             }
         }
@@ -157,7 +165,9 @@ static int probe_one(int fd, struct sockaddr_in *dest, int ttl, int timeoutMs,
             double rtt = now_ms() - sentAt;
             if (n >= (ssize_t) sizeof(struct icmphdr)) {
                 struct icmphdr *reply = (struct icmphdr *) databuf;
-                if (reply->type == ICMP_ECHOREPLY) {
+                if (reply->type == ICMP_ECHOREPLY &&
+                    reply->un.echo.id == htons(ident) &&
+                    reply->un.echo.sequence == htons((unsigned short) ttl)) {
                     hop->hasAddress = 1;
                     inet_ntop(AF_INET, &from.sin_addr, hop->address, sizeof(hop->address));
                     hop->hasRtt = 1;
@@ -165,6 +175,8 @@ static int probe_one(int fd, struct sockaddr_in *dest, int ttl, int timeoutMs,
                     hop->isDestination = 1;
                     return 1;
                 }
+                // id/sequence không khớp -> reply của probe khác, bỏ qua và
+                // tiếp tục chờ trong thời gian còn lại.
             }
         }
 
@@ -205,11 +217,19 @@ static jstring native_trace(JNIEnv *env, jobject thiz, jstring jhost, jint maxHo
     int fd = open_ping_socket(&ident);
     if (fd < 0) return make_error_json(env, "socket_failed");
 
+    // Clamp giống phía iOS (Traceroute.swift) để cùng API Dart cho hành vi
+    // nhất quán giữa hai nền tảng thay vì mỗi bên tự giới hạn một kiểu.
     int hops = maxHops > 0 ? maxHops : 30;
+    if (hops < 1) hops = 1;
+    if (hops > 64) hops = 64;
     int perHop = timeoutMs > 0 ? timeoutMs : 1500;
 
     size_t cap = 4096;
     char *json = malloc(cap);
+    if (json == NULL) {
+        close(fd);
+        return make_error_json(env, "alloc_failed");
+    }
     size_t used = (size_t) snprintf(json, cap, "[");
 
     for (int ttl = 1; ttl <= hops; ttl++) {
@@ -218,8 +238,15 @@ static jstring native_trace(JNIEnv *env, jobject thiz, jstring jhost, jint maxHo
         if (r < 0) break;
 
         if (used + 256 > cap) {
-            cap *= 2;
-            json = realloc(json, cap);
+            size_t newCap = cap * 2;
+            char *grown = realloc(json, newCap);
+            if (grown == NULL) {
+                free(json);
+                close(fd);
+                return make_error_json(env, "alloc_failed");
+            }
+            json = grown;
+            cap = newCap;
         }
 
         char addrPart[64];
@@ -247,8 +274,14 @@ static jstring native_trace(JNIEnv *env, jobject thiz, jstring jhost, jint maxHo
     close(fd);
 
     if (used + 2 > cap) {
-        cap += 2;
-        json = realloc(json, cap);
+        size_t newCap = cap + 2;
+        char *grown = realloc(json, newCap);
+        if (grown == NULL) {
+            free(json);
+            return make_error_json(env, "alloc_failed");
+        }
+        json = grown;
+        cap = newCap;
     }
     snprintf(json + used, cap - used, "]");
 

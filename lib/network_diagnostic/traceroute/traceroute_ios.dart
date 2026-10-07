@@ -59,6 +59,9 @@ class IosTraceroute extends Traceroute {
       return const TracerouteResult(hops: [], reachedDestination: false);
     } on PlatformException {
       return const TracerouteResult(hops: [], reachedDestination: false);
+    } on TypeError {
+      // Phần tử trả về không đúng kiểu Map/ttl/address/... như kỳ vọng.
+      return const TracerouteResult(hops: [], reachedDestination: false);
     }
   }
 }

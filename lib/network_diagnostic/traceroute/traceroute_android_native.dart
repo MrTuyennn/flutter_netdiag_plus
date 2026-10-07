@@ -64,6 +64,13 @@ class AndroidNativeTraceroute extends Traceroute {
       return const TracerouteResult(hops: [], reachedDestination: false);
     } on PlatformException {
       return const TracerouteResult(hops: [], reachedDestination: false);
+    } on FormatException {
+      // JSON native trả về bị méo/cắt cụt — coi như không lấy được kết quả
+      // thay vì để lỗi parse văng ra ngoài.
+      return const TracerouteResult(hops: [], reachedDestination: false);
+    } on TypeError {
+      // Giá trị trong JSON sai kiểu so với kỳ vọng (ttl/address/rttMs/...).
+      return const TracerouteResult(hops: [], reachedDestination: false);
     }
   }
 }

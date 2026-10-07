@@ -22,10 +22,14 @@ class FlutterNetdiagPlusPlugin :
     private lateinit var executor: ExecutorService
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    @Volatile
+    private var isAttached = false
+
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         executor = Executors.newSingleThreadExecutor()
         channel = MethodChannel(flutterPluginBinding.binaryMessenger, "flutter_netdiag_plus/traceroute_android")
         channel.setMethodCallHandler(this)
+        isAttached = true
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {
@@ -46,15 +50,21 @@ class FlutterNetdiagPlusPlugin :
         executor.execute {
             try {
                 val json = TracerouteNative.nativeTrace(host, maxHops, timeoutMs)
-                mainHandler.post { result.success(json) }
+                // Engine (và channel/result của nó) có thể đã bị detach trong lúc
+                // tác vụ native này còn đang chạy (hot restart, activity recreate) —
+                // không được gọi result trên một channel đã chết.
+                mainHandler.post { if (isAttached) result.success(json) }
             } catch (e: Throwable) {
-                mainHandler.post { result.error("TRACE_FAILED", e.message, null) }
+                mainHandler.post { if (isAttached) result.error("TRACE_FAILED", e.message, null) }
             }
         }
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        isAttached = false
         channel.setMethodCallHandler(null)
-        executor.shutdown()
+        // shutdownNow() thay vì shutdown(): cố interrupt tác vụ trace đang chạy
+        // thay vì để nó chạy hết (có thể hàng chục giây) với socket bị bỏ rơi.
+        executor.shutdownNow()
     }
 }

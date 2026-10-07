@@ -66,7 +66,12 @@ final class Traceroute {
             tv_sec: Int(perHopTimeout),
             tv_usec: Int32((perHopTimeout - floor(perHopTimeout)) * 1_000_000)
         )
-        setsockopt(icmpFD, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        guard setsockopt(icmpFD, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size)) == 0
+        else {
+            // Không set được timeout đọc thì recvfrom() có thể treo vô hạn —
+            // thà báo lỗi còn hơn để thread bị block vĩnh viễn.
+            throw TracerouteError.socketFailed("setsockopt SO_RCVTIMEO errno \(errno)")
+        }
 
         var hops: [TraceHop] = []
 
