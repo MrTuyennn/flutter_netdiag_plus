@@ -1,3 +1,28 @@
+## 1.0.1
+
+* Fix: iOS traceroute checks the `setsockopt(SO_RCVTIMEO)` result instead of
+  ignoring it — previously a failed call could leave the ICMP socket with no
+  read timeout and hang `recvfrom()` (and the awaiting Dart `Future`)
+  indefinitely.
+* Fix: Android native traceroute (`traceroute.c`) now verifies the ICMP
+  echo id/sequence on every reply (both the direct echo reply and the
+  `MSG_ERRQUEUE` Time Exceeded/Unreachable path) before accepting it, so a
+  delayed reply from an earlier hop can no longer be misattributed to the
+  current TTL under packet reordering/jitter.
+* Fix: Android native traceroute no longer leaves an unbounded/dangling
+  allocation on `malloc`/`realloc` failure — it now fails gracefully with an
+  `alloc_failed` error instead of crashing the native process.
+* Fix: Android native traceroute clamps `maxHops` to `[1, 64]`, matching the
+  iOS implementation, so the same Dart call no longer behaves differently
+  per platform.
+* Fix: `FlutterNetdiagPlusPlugin` (Android) no longer delivers a
+  `MethodChannel.Result` after the engine has detached (e.g. hot restart,
+  activity recreation), and attempts to interrupt an in-flight trace on
+  detach instead of letting it run to completion against a dead channel.
+* Fix: both Android and iOS Dart traceroute wrappers now catch malformed
+  native results (`FormatException`/`TypeError`) and degrade to an empty
+  result instead of throwing uncaught.
+
 ## 0.1.0
 
 * First release of `flutter_netdiag_plus`.
