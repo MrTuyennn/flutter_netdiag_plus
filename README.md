@@ -10,7 +10,7 @@ steps required.
 
 ```yaml
 dependencies:
-  flutter_netdiag_plus: ^0.1.0
+  flutter_netdiag_plus: ^1.0.1
 ```
 
 ```bash
