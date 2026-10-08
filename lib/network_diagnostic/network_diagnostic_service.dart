@@ -30,6 +30,12 @@ import 'network_diagnostic_models.dart';
 /// Để null → bước traceroute hiện trạng thái "không khả dụng" thay vì bịa số.
 typedef HopResolver = Future<int?> Function(String host);
 
+/// Hàm cập nhật trạng thái một step theo id, dùng trong các bước đo song song.
+typedef _StepSetter = void Function(
+  String id,
+  DiagStep Function(DiagStep) update,
+);
+
 class NetworkDiagnosticService {
   NetworkDiagnosticService({
     required this.host,
@@ -95,10 +101,17 @@ class NetworkDiagnosticService {
 
   /// Chạy toàn bộ, emit lại cả danh sách sau mỗi thay đổi.
   ///
+  /// Mọi bước chạy ĐỒNG THỜI (song song), không đợi bước phía trên xong rồi
+  /// mới bắt đầu bước sau — bước nào xong trước thì trạng thái của nó cập
+  /// nhật trước, bất kể thứ tự hiển thị trong danh sách. Vì vậy TCP Connect
+  /// tự resolve host của riêng nó (không ăn theo kết quả DNS Lookup) để
+  /// không bị khoá chờ bước DNS.
+  ///
   /// Emit cả list (thay vì từng step) để UI chỉ cần một `setState`.
-  Stream<List<DiagStep>> run() async* {
+  Stream<List<DiagStep>> run() {
     _cancelled = false;
     final steps = {for (final s in buildInitialSteps()) s.id: s};
+    final controller = StreamController<List<DiagStep>>();
 
     List<DiagStep> snapshot() => steps.values.toList(growable: false);
 
@@ -107,28 +120,51 @@ class NetworkDiagnosticService {
       if (current != null) steps[id] = update(current);
     }
 
-    yield snapshot();
+    void emit() {
+      if (!controller.isClosed) controller.add(snapshot());
+    }
 
-    // ---------------------------------------------------------------- DNS
+    emit();
+
+    final tasks = <Future<void>>[
+      _runDns(set, emit),
+      _runTcp(set, emit),
+      _runHttp(set, emit),
+      for (final target in externalTargets) _runPing(target, set, emit),
+      _runTraceroute(set, emit),
+    ];
+
+    Future.wait(tasks).whenComplete(() {
+      if (!controller.isClosed) controller.close();
+    });
+
+    return controller.stream;
+  }
+
+  // ---------------------------------------------------------------- DNS
+  Future<void> _runDns(_StepSetter set, void Function() emit) async {
+    if (_cancelled) return;
     set('dns', (s) => s.copyWith(status: DiagStatus.running));
-    yield snapshot();
+    emit();
 
-    InternetAddress? resolved;
     try {
       final sw = Stopwatch()..start();
       final addrs = await InternetAddress.lookup(host).timeout(timeout);
       sw.stop();
       if (addrs.isEmpty) throw const SocketException('Không có bản ghi A/AAAA');
-      resolved = addrs.first;
+      final resolved = addrs.first;
       set(
         'dns',
         (s) => s.copyWith(
           status: DiagStatus.success,
           elapsed: sw.elapsed,
-          value: '${_ms(sw.elapsed)} → ${resolved!.address}',
+          value: '${_ms(sw.elapsed)} → ${resolved.address}',
           detail: addrs.length > 1 ? '${addrs.length} bản ghi' : null,
         ),
       );
+      // Lưu ý: InternetAddress.lookup đi qua resolver của OS nên CÓ CACHE —
+      // lần đo thứ hai trở đi thường ra ~0ms. Muốn đo DNS thật, dùng DoH
+      // (package dns_client) query thẳng 1.1.1.1 / 8.8.8.8.
     } catch (e) {
       set(
         'dns',
@@ -139,55 +175,50 @@ class NetworkDiagnosticService {
         ),
       );
     }
-    yield snapshot();
     if (_cancelled) return;
+    emit();
+  }
 
-    // Lưu ý: InternetAddress.lookup đi qua resolver của OS nên CÓ CACHE —
-    // lần đo thứ hai trở đi thường ra ~0ms. Muốn đo DNS thật, dùng DoH
-    // (package dns_client) query thẳng 1.1.1.1 / 8.8.8.8.
+  // -------------------------------------------------------- TCP Connect
+  Future<void> _runTcp(_StepSetter set, void Function() emit) async {
+    if (_cancelled) return;
+    set('tcp', (s) => s.copyWith(status: DiagStatus.running));
+    emit();
 
-    // -------------------------------------------------------- TCP Connect
-    if (resolved != null) {
-      set('tcp', (s) => s.copyWith(status: DiagStatus.running));
-      yield snapshot();
-      try {
-        final sw = Stopwatch()..start();
-        final socket = await Socket.connect(resolved, port, timeout: timeout);
-        sw.stop();
-        socket.destroy();
-        set(
-          'tcp',
-          (s) => s.copyWith(
-            status: sw.elapsed > serverWarnAbove
-                ? DiagStatus.warning
-                : DiagStatus.success,
-            elapsed: sw.elapsed,
-            value: _ms(sw.elapsed),
-          ),
-        );
-      } catch (e) {
-        set(
-          'tcp',
-          (s) => s.copyWith(
-            status: DiagStatus.failed,
-            value: 'Không kết nối được',
-            detail: _friendly(e),
-          ),
-        );
-      }
-    } else {
+    try {
+      final sw = Stopwatch()..start();
+      final socket = await Socket.connect(host, port, timeout: timeout);
+      sw.stop();
+      socket.destroy();
       set(
         'tcp',
-        (s) =>
-            s.copyWith(status: DiagStatus.skipped, value: 'Bỏ qua (DNS lỗi)'),
+        (s) => s.copyWith(
+          status: sw.elapsed > serverWarnAbove
+              ? DiagStatus.warning
+              : DiagStatus.success,
+          elapsed: sw.elapsed,
+          value: _ms(sw.elapsed),
+        ),
+      );
+    } catch (e) {
+      set(
+        'tcp',
+        (s) => s.copyWith(
+          status: DiagStatus.failed,
+          value: 'Không kết nối được',
+          detail: _friendly(e),
+        ),
       );
     }
-    yield snapshot();
     if (_cancelled) return;
+    emit();
+  }
 
-    // ----------------------------------------------------------- HTTP RTT
+  // ----------------------------------------------------------- HTTP RTT
+  Future<void> _runHttp(_StepSetter set, void Function() emit) async {
+    if (_cancelled) return;
     set('http', (s) => s.copyWith(status: DiagStatus.running));
-    yield snapshot();
+    emit();
 
     final uri = httpUri ?? Uri.https(host, '/');
     final client = HttpClient()..connectionTimeout = timeout;
@@ -225,42 +256,50 @@ class NetworkDiagnosticService {
     } finally {
       client.close(force: true);
     }
-    yield snapshot();
+    if (_cancelled) return;
+    emit();
+  }
+
+  // -------------------------------------------------------- Ping ngoài
+  Future<void> _runPing(
+    PingTarget target,
+    _StepSetter set,
+    void Function() emit,
+  ) async {
+    if (_cancelled) return;
+    set(target.id, (s) => s.copyWith(status: DiagStatus.running));
+    emit();
+
+    final result = await _tcpPing(target.host, target.port);
     if (_cancelled) return;
 
-    // -------------------------------------------------------- Ping ngoài
-    for (final target in externalTargets) {
-      if (_cancelled) return;
-      set(target.id, (s) => s.copyWith(status: DiagStatus.running));
-      yield snapshot();
-
-      final result = await _tcpPing(target.host, target.port);
-      if (result == null) {
-        set(
-          target.id,
-          (s) => s.copyWith(
-            status: DiagStatus.failed,
-            value: 'Không tới được',
-            detail: 'Thử $pingAttempts lần đều lỗi',
-          ),
-        );
-      } else {
-        set(
-          target.id,
-          (s) => s.copyWith(
-            status: result > externalWarnAbove
-                ? DiagStatus.warning
-                : DiagStatus.success,
-            elapsed: result,
-            value: _ms(result),
-          ),
-        );
-      }
-      yield snapshot();
+    if (result == null) {
+      set(
+        target.id,
+        (s) => s.copyWith(
+          status: DiagStatus.failed,
+          value: 'Không tới được',
+          detail: 'Thử $pingAttempts lần đều lỗi',
+        ),
+      );
+    } else {
+      set(
+        target.id,
+        (s) => s.copyWith(
+          status: result > externalWarnAbove
+              ? DiagStatus.warning
+              : DiagStatus.success,
+          elapsed: result,
+          value: _ms(result),
+        ),
+      );
     }
-    if (_cancelled) return;
+    emit();
+  }
 
-    // -------------------------------------------------------- Traceroute
+  // -------------------------------------------------------- Traceroute
+  Future<void> _runTraceroute(_StepSetter set, void Function() emit) async {
+    if (_cancelled) return;
     final resolver = hopResolver;
     if (resolver == null) {
       set(
@@ -271,29 +310,32 @@ class NetworkDiagnosticService {
           detail: 'Cần backend hoặc native plugin',
         ),
       );
-    } else {
-      set('traceroute', (s) => s.copyWith(status: DiagStatus.running));
-      yield snapshot();
-      try {
-        final hops = await resolver(host).timeout(traceTimeout);
-        set(
-          'traceroute',
-          (s) => hops == null
-              ? s.copyWith(status: DiagStatus.skipped, value: 'Không khả dụng')
-              : s.copyWith(status: DiagStatus.success, value: '$hops chặng'),
-        );
-      } catch (e) {
-        set(
-          'traceroute',
-          (s) => s.copyWith(
-            status: DiagStatus.failed,
-            value: 'Thất bại',
-            detail: _friendly(e),
-          ),
-        );
-      }
+      emit();
+      return;
     }
-    yield snapshot();
+
+    set('traceroute', (s) => s.copyWith(status: DiagStatus.running));
+    emit();
+    try {
+      final hops = await resolver(host).timeout(traceTimeout);
+      set(
+        'traceroute',
+        (s) => hops == null
+            ? s.copyWith(status: DiagStatus.skipped, value: 'Không khả dụng')
+            : s.copyWith(status: DiagStatus.success, value: '$hops chặng'),
+      );
+    } catch (e) {
+      set(
+        'traceroute',
+        (s) => s.copyWith(
+          status: DiagStatus.failed,
+          value: 'Thất bại',
+          detail: _friendly(e),
+        ),
+      );
+    }
+    if (_cancelled) return;
+    emit();
   }
 
   /// Chạy một phát rồi trả report — dùng khi muốn log/gửi server, không cần UI.

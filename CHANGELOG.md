@@ -1,3 +1,20 @@
+## 1.0.2
+
+* `NetworkDiagnosticService.run()` now runs all steps (DNS lookup, TCP
+  connect, HTTP RTT, every external ping target, and traceroute)
+  concurrently instead of one after another — each step updates its own
+  status/result as soon as it finishes, instead of waiting for the steps
+  listed above it to finish first. Total run time drops from the sum of
+  every step's duration to roughly the duration of the slowest one.
+* TCP Connect no longer reuses the `InternetAddress` resolved by the DNS
+  Lookup step — it resolves the host itself via `Socket.connect(host, port)`
+  so it is fully independent and is never skipped or delayed by a slow or
+  failing DNS step.
+* Example app: fixed a bug where typing a full URL (with `http(s)://` and a
+  path) into the host field, or leaving a path in the default host, made
+  DNS Lookup fail — the host is now consistently extracted (scheme + path
+  stripped) both on first load and when pressing "Đo".
+
 ## 1.0.1
 
 * Fix: iOS traceroute checks the `setsockopt(SO_RCVTIMEO)` result instead of

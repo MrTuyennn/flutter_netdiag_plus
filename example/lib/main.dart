@@ -36,7 +36,7 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  static const _defaultHost = 'example.com';
+  static const _defaultHost = 'github.com';
 
   final _hostController = TextEditingController(text: _defaultHost);
 
@@ -53,7 +53,12 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
-    _service = _buildService(_defaultHost);
+    _host = _extractHost(_defaultHost);
+    _service = _buildService(_host);
+  }
+
+  static String _extractHost(String input) {
+    return input.trim().replaceAll(RegExp(r'^https?://'), '').split('/').first;
   }
 
   @override
@@ -80,11 +85,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _measure() {
-    final host = _hostController.text
-        .trim()
-        .replaceAll(RegExp(r'^https?://'), '')
-        .split('/')
-        .first;
+    final host = _extractHost(_hostController.text);
     if (host.isEmpty) return;
 
     FocusScope.of(context).unfocus();
